@@ -11,6 +11,7 @@ from collections import defaultdict
 import random
 from util import *
 import math
+import pickle
 
 note_ranges = {
 	"violin": (55, 103),
@@ -59,6 +60,7 @@ def readTracks():
 # tracksFromFile
 # Given a filepath and an existing array of tracks, reads the midi file from that filepath and 
 # adds its tracks to the tracks array
+# helper function for readTracks
 def tracksFromFile(filepath, tracks):
 	song = midi.read_midifile(filepath)
 	tracks.extend(song[1:])
@@ -122,75 +124,111 @@ def getTrainingAndTestSet(tracks):
 		instCounts[getInstrument(tracks[i])] += 1
 	for i in removedFromTraining:
 		trainingTracks.pop(i)
-
-	# for inst in insts:
-	# 	for i in range(int(math.floor(insts[inst] * 0.3))):
-	# 		for i in range(len(tracks)):
-	# 			if getInstrument(tracks[i]) == insts[inst]:
-	# 				track = trainingTracks.pop(i)
-	# 				testTracks.add(track)
 	print "Done."
 	return trainingTracks, testTracks
 
 # getWeightVector
-# Given two instruments, a training set, and a step size, returns a weight vector trained to return +1 given a 
-# sample of inst1 and -1 given a sample of inst2
-def getWeightVector(inst1, inst2, trainTracks, eta):
-	def extractFeatures(track):
-		features = {}
-		# feature for number of occurences of each MIDI note
-		# additionally, feature for number of occurences of pairs of MIDI notes
-		for i in range(len(track)):
-			if type(track[i]) == midi.NoteOnEvent:
-				if str(track[i].data[0]) in features:
-					features[str(track[i].data[0])] += 1
-				else: features[str(track[i].data[0])] = 1
-				if type(track[i + 2]) == midi.NoteOnEvent:
-					featureName = "{} {}".format(track[i].data[0], track[i + 2].data[0])
-					if featureName in features:
-						features[featureName] += 1
-					else: features[featureName] = 1
-
+# Given two instruments, a training set, a step size, and number of iterations, 
+# returns a weight vector trained to return +1 given a sample of inst1 and -1 given a sample of inst2
+def getWeightVector(inst1, inst2, trainTracks, features, eta, numIters):
 	print "Getting weight vector for inst1={} and inst2={}".format(inst1, inst2)
 	weights = {}
-	for track in trainTracks:
-		if getInstrument(track) == inst1:
-			features = extractFeatures(track)
-			if dotProduct(features, weights) < 1.:
-				increment(weights, eta, features)
-		if getInstrument(track) == inst2:
-			features = extractFeatures(track)
-			if dotProduct(features, weights) * -1 < 1:
-				increment(weights, eta * -1, features)
+	for i in range(numIters):
+		for j in range(len(trainTracks)):
+			if getInstrument(trainTracks[i]) == inst1:
+				if dotProduct(features[i], weights) < 1.:
+					increment(weights, eta, features[i])
+			if getInstrument(trainTracks[i]) == inst2:
+				if dotProduct(features[i], weights) * -1 < 1:
+					increment(weights, eta * -1, features[i])
+	return weights
 
-	
+# getFeatureVectors
+# Given a list of tracks, returns a dict mapping each track to its feature vector
+def getFeatureVectors(tracks):
+	print "Extracting features..."
+	features = {}
+	# feature for number of occurences of each MIDI note
+	# additionally, feature for number of occurences of pairs of MIDI notes
+	# will be expanded
+	for i in range(len(tracks)):
+		features[i] = {}
+		for j in range(len(tracks[i])):
+			if type(tracks[i][j]) == midi.NoteOnEvent:
+				if str(tracks[i][j].data[0]) in features:
+					features[i][str(tracks[i][j].data[0])] += 1
+				else: features[i][str(tracks[i][j].data[0])] = 1
+				if j < len(tracks[i]) - 2 and type(tracks[i][j + 2]) == midi.NoteOnEvent:
+					featureName = "{} {}".format(tracks[i][j].data[0], tracks[i][j + 2].data[0])
+					if featureName in features:
+						features[i][featureName] += 1
+					else: features[i][featureName] = 1
+	print "Done."
+	return features
+
+# weightVectorsToPickle
+# Given a training set, learns weight vectors for pairs of instruments, then stores that set in a pickle file
+# takes ~20min to run
+def weightVectorsToPickle(trainTracks):
+	weightVectors = {}
+
+	featureVectors = getFeatureVectors(trainTracks)
+
+	for inst1 in insts:
+		for inst2 in insts:
+			if not inst1 == inst2:
+				weightVectors[inst1, inst2] = getWeightVector(inst1, inst2, trainTracks, featureVectors, 0.1, 200)
+
+	wvFile = open("weight_vectors", "ab")
+	pickle.dump(weightVectors, wvFile)
+	wvFile.close()
+
+# pickleToWeightVectors
+# Reads a weightVectors dict from a pickle created in weightVectorsToPickle
+def pickleToWeightVectors():
+	wvFile = open("weight_vectors", "rb")
+	weightVectors = pickle.load(wvFile)
+	return weightVectors
+
+# evaluateOnTestSet
+# Given weight vectors and a test set, prints percentage correctly identified and counts
+def evaluateOnTestSet(weightVectors, testTracks):
+	numEvaluated = 0.
+	numCorrect = 0.
+	testFeatures = getFeatureVectors(testTracks)
+	for i in range(len(testTracks)):
+		instGuesses = {}
+		for inst1 in insts:
+			for inst2 in insts:
+				if not inst1 == inst2:
+					result = dotProduct(weightVectors[inst1, inst2], testFeatures[i])
+					if result > 0:
+						instGuesses[inst1] = instGuesses.get(inst1, 0) + 1
+
+		max = 0, ""
+		# print instGuesses
+		for guess in instGuesses:
+			if instGuesses[guess] > max[0]:
+				max = instGuesses[guess], guess
+				print max
+				print getInstrument(testTracks[i])
+		# print max
+		numEvaluated += 1
+		if max[1] == getInstrument(testTracks[i]):
+			numCorrect += 1
+	print "Successfully guessed {} out of {} ({} correct)".format(numCorrect, numEvaluated, numCorrect/numEvaluated)
 
 
-
+# ------------------ MAIN ------------------
 tracks = readTracks()
 insts = getInstrumentSet(tracks)
-
 removeSmallEntries(tracks, insts)
-print insts
-print len(tracks)
-
 trainTracks, testTracks = getTrainingAndTestSet(tracks)
 
-print len(trainTracks)
-print len(testTracks)
-print len(tracks)
-
-weightVectors = {}
-for inst1 in insts:
-	for inst2 in insts:
-		if not inst1 == inst2:
-			weightVectors[inst1, inst2] = getWeightVector(inst1, inst2, trainTracks, 0.1)
-
-
-
-#split into training and test set
-#perform one-to-one reduction of this multiclass classification problem into many binary class. problems
-#evaluate on test set
+# uncomment below to relearn weight vectors (e.g., if feature extractor changed)
+# weightVectorsToPickle(trainTracks)
+weightVectors = pickleToWeightVectors()
+evaluateOnTestSet(weightVectors, testTracks)
 
 
 
