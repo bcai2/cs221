@@ -153,6 +153,8 @@ def getFeatureVectors(tracks):
 	# will be expanded
 	for i in range(len(tracks)):
 		features[i] = {}
+		lowest = 127
+		highest = 0
 		for j in range(len(tracks[i])):
 			if type(tracks[i][j]) == midi.NoteOnEvent:
 				if str(tracks[i][j].data[0]) in features:
@@ -163,6 +165,9 @@ def getFeatureVectors(tracks):
 					if featureName in features:
 						features[i][featureName] += 1
 					else: features[i][featureName] = 1
+				# features for lowest and highest notes
+				if tracks[i][j].data[0] < lowest: features[i]["LOWEST_NOTE"] = tracks[i][j].data[0]
+				if tracks[i][j].data[0] > highest: features[i]["HIGHEST_NOTE"] = tracks[i][j].data[0]
 	print "Done."
 	return features
 
@@ -179,14 +184,14 @@ def weightVectorsToPickle(trainTracks):
 			if not inst1 == inst2:
 				weightVectors[inst1, inst2] = getWeightVector(inst1, inst2, trainTracks, featureVectors, 0.1, 200)
 
-	wvFile = open("weight_vectors", "ab")
+	wvFile = open("weight_vectors_1", "ab")
 	pickle.dump(weightVectors, wvFile)
 	wvFile.close()
 
 # pickleToWeightVectors
 # Reads a weightVectors dict from a pickle created in weightVectorsToPickle
 def pickleToWeightVectors():
-	wvFile = open("weight_vectors", "rb")
+	wvFile = open("weight_vectors_1", "rb")
 	weightVectors = pickle.load(wvFile)
 	return weightVectors
 
@@ -226,7 +231,7 @@ removeSmallEntries(tracks, insts)
 trainTracks, testTracks = getTrainingAndTestSet(tracks)
 
 # uncomment below to relearn weight vectors (e.g., if feature extractor changed)
-# weightVectorsToPickle(trainTracks)
+weightVectorsToPickle(trainTracks)
 weightVectors = pickleToWeightVectors()
 evaluateOnTestSet(weightVectors, testTracks)
 
