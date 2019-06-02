@@ -63,6 +63,15 @@ def readTracks():
 # helper function for readTracks
 def tracksFromFile(filepath, tracks):
 	song = midi.read_midifile(filepath)
+	# print song[0]
+	resolution = song.resolution
+	microSecPerBeat = 0.0
+	for event in song[0]:
+		if type(event) == midi.SetTempoEvent:
+			microSecPerBeat = event.get_mpqn()
+	secondsPerTick = (microSecPerBeat / resolution) * 1.0 / 1000000
+	# print secondsPerTick
+	newTrack = song[1:].append(secondsPerTick)
 	tracks.extend(song[1:])
 
 # getInstrumentSet
@@ -87,19 +96,27 @@ def getInstrument(track):
 
 # removeSmallEntries
 # Given an array of tracks and set of instrument counts, removes all instances of instruments with 
-# less than 20 entries from tracks
+# less than 40 entries from tracks
+# Additionally, caps each instrument at 100 entries (to be implemented).
 # This function is not optimized for runtime and could be faster.
-def removeSmallEntries(tracks, insts):
-	print "Removing instrument parts with count < 20..."
+def removeSmallAndLargeEntries(tracks, insts):
+	print "Removing instrument parts with count < 40..."
 	#newTracks = list(tracks)
 	for inst in dict(insts):
-		if insts[inst] < 20 or inst == 'string ensemble 1':
+		if insts[inst] < 40 or inst == 'string ensemble 1':
 			for i in reversed(range(len(tracks))):
 				if getInstrument(tracks[i]) == inst or getInstrument(tracks[i]) == None:
 					del tracks[i]
 			del insts[inst]
+	runningInstCounts = {}
+	for i in reversed(range(len(tracks))):
+		currInst = getInstrument(tracks[i])
+		if runningInstCounts.get(currInst, 0) > 99:
+			del tracks[i]
+		else: runningInstCounts[currInst] = runningInstCounts.get(currInst, 0) + 1
+	# insts = runningInstCounts
 	print "Done."
-	#return newTracks
+	return runningInstCounts
 
 # getTrainingAndTestSets
 # Given a set of tracks, splits them by instrument into training and test sets
@@ -107,7 +124,10 @@ def removeSmallEntries(tracks, insts):
 # This function is not optimized for runtime and could be faster.
 def getTrainingAndTestSet(tracks):
 	print "Getting training and test sets..."
+
 	trainingTracks = list(tracks)
+	random.seed(123)
+	random.shuffle(trainingTracks)
 	testTracks = []
 	instCounts = dict(insts)
 	removedFromTraining = []
@@ -130,7 +150,8 @@ def getTrainingAndTestSet(tracks):
 # getWeightVector
 # Given two instruments, a training set, a step size, and number of iterations, 
 # returns a weight vector trained to return +1 given a sample of inst1 and -1 given a sample of inst2
-def getWeightVector(inst1, inst2, trainTracks, features, eta, numIters):
+# includes regularization of weight vector
+def getWeightVector(inst1, inst2, trainTracks, features, eta, gamma, numIters):
 	print "Getting weight vector for inst1={} and inst2={}".format(inst1, inst2)
 	weights = {}
 	for i in range(numIters):
@@ -138,9 +159,11 @@ def getWeightVector(inst1, inst2, trainTracks, features, eta, numIters):
 			if getInstrument(trainTracks[i]) == inst1:
 				if dotProduct(features[i], weights) < 1.:
 					increment(weights, eta, features[i])
+					increment(weights, -gamma, weights)
 			if getInstrument(trainTracks[i]) == inst2:
 				if dotProduct(features[i], weights) * -1 < 1:
 					increment(weights, eta * -1, features[i])
+					increment(weights, -gamma, weights)
 	return weights
 
 # getFeatureVectors
@@ -148,26 +171,78 @@ def getWeightVector(inst1, inst2, trainTracks, features, eta, numIters):
 def getFeatureVectors(tracks):
 	print "Extracting features..."
 	features = {}
-	# feature for number of occurences of each MIDI note
-	# additionally, feature for number of occurences of pairs of MIDI notes
-	# will be expanded
 	for i in range(len(tracks)):
-		features[i] = {}
+		features[i] = defaultdict(lambda:0.0)
 		lowest = 127
 		highest = 0
+		numOnsets = 0
+		lengthTotal = 0.0
+		noteValueSum = 0
+		numNotes = 0
+		singleNoteCounter = defaultdict(lambda:0.0)
+		bigramCounter = defaultdict(lambda:0.0)
+		numBigrams = 0
+		trigramCounter = defaultdict(lambda:0.0)
+		numTrigrams = 0
+		intervalCounter = defaultdict(lambda:0.0)
+		numIntervals = 0
 		for j in range(len(tracks[i])):
-			if type(tracks[i][j]) == midi.NoteOnEvent:
-				if str(tracks[i][j].data[0]) in features:
-					features[i][str(tracks[i][j].data[0])] += 1
-				else: features[i][str(tracks[i][j].data[0])] = 1
-				if j < len(tracks[i]) - 2 and type(tracks[i][j + 2]) == midi.NoteOnEvent:
-					featureName = "{} {}".format(tracks[i][j].data[0], tracks[i][j + 2].data[0])
-					if featureName in features:
-						features[i][featureName] += 1
-					else: features[i][featureName] = 1
+			if type(tracks[i][j]) == midi.NoteOnEvent and tracks[i][j].get_velocity() > 0:
+				# feature for average note value
+				noteValueSum += tracks[i][j].get_pitch()
+				numNotes += 1
+				# feature for occurences of each note
+				singleNoteCounter[tracks[i][j].get_pitch()] += 1
+				# feature for note bigrams
+				if j < len(tracks[i]) - 2 and type(tracks[i][j + 2]) == midi.NoteOnEvent and tracks[i][j + 2].get_velocity() > 0:
+					featureName = "{} {}".format(tracks[i][j].get_pitch(), tracks[i][j + 2].get_pitch())
+					bigramCounter[featureName] += 1
+					numBigrams += 1
+				# feature for trigrams
+				if j < len(tracks[i]) - 4 and type(tracks[i][j + 2]) == midi.NoteOnEvent and type(tracks[i][j + 4]) == midi.NoteOnEvent \
+					and tracks[i][j + 2].get_velocity() > 0 and tracks[i][j + 4].get_velocity() > 0:
+					featureName = "{} {} {}".format(tracks[i][j].get_pitch(), tracks[i][j + 2].get_pitch(), tracks[i][j + 4].get_pitch())
+					trigramCounter[featureName] += 1
+					numTrigrams += 1
 				# features for lowest and highest notes
-				if tracks[i][j].data[0] < lowest: features[i]["LOWEST_NOTE"] = tracks[i][j].data[0]
-				if tracks[i][j].data[0] > highest: features[i]["HIGHEST_NOTE"] = tracks[i][j].data[0]
+				if tracks[i][j].get_pitch() < lowest: 
+					features[i]["LOWEST_NOTE"] = tracks[i][j].get_pitch()
+					lowest = tracks[i][j].get_pitch()
+				if tracks[i][j].get_pitch() > highest: 
+					features[i]["HIGHEST_NOTE"] = tracks[i][j].get_pitch()
+					highest = tracks[i][j].get_pitch()
+				# features for number of occurences of intervals
+				if j < len(tracks[i]) - 2 and type(tracks[i][j + 2]) == midi.NoteOnEvent and tracks[i][j + 2].get_velocity() > 0:
+					featureName = "INTERVAL {}".format(abs(tracks[i][j].get_pitch() - tracks[i][j + 2].get_pitch()))
+					intervalCounter[featureName] += 1
+					numIntervals += 1
+				#feature for average length between onsets of notes.
+				if j < len(tracks[i]) - 2 and type(tracks[i][j + 2]) == midi.NoteOnEvent:
+					# print tracks[i][j]
+					# print tracks[i][j + 1]
+					# print tracks[i][j + 2]
+					if (type(tracks[i][j + 1]) == midi.NoteOnEvent and tracks[i][j + 1].get_velocity() == 0) or \
+						(type(tracks[i][j + 1]) == midi.NoteOffEvent):
+						# print "true"
+						numOnsets += 1
+						lengthTotal += tracks[i][j + 1].tick + tracks[i][j + 2].tick
+		for note in singleNoteCounter:
+			singleNoteCounter[note] /= numNotes
+			features[i][str(note)] = singleNoteCounter[note]
+		for bigram in bigramCounter:
+			bigramCounter[bigram] /= numBigrams
+			features[i][bigram] = bigramCounter[bigram]
+		for trigram in trigramCounter:
+			trigramCounter[trigram] /= numTrigrams
+			features[i][trigram] = trigramCounter[trigram]
+		for inter in intervalCounter:
+			intervalCounter[inter] /= numIntervals
+			features[i][inter] = intervalCounter[inter]
+		if numOnsets:
+			features[i]["DIST_BTWN_NOTES"] = lengthTotal / numOnsets
+		if numNotes: 
+			features[i]["AVG_NOTE_VALUE"] = noteValueSum / numNotes
+		# print features[i]["DIST_BTWN_NOTES"]
 	print "Done."
 	return features
 
@@ -182,16 +257,16 @@ def weightVectorsToPickle(trainTracks):
 	for inst1 in insts:
 		for inst2 in insts:
 			if not inst1 == inst2:
-				weightVectors[inst1, inst2] = getWeightVector(inst1, inst2, trainTracks, featureVectors, 0.1, 200)
+				weightVectors[inst1, inst2] = getWeightVector(inst1, inst2, trainTracks, featureVectors, 0.1, 0.1, 250)
 
-	wvFile = open("weight_vectors_1", "ab")
+	wvFile = open("weight_vectors_4", "ab")
 	pickle.dump(weightVectors, wvFile)
 	wvFile.close()
 
 # pickleToWeightVectors
 # Reads a weightVectors dict from a pickle created in weightVectorsToPickle
 def pickleToWeightVectors():
-	wvFile = open("weight_vectors_1", "rb")
+	wvFile = open("weight_vectors_4", "rb")
 	weightVectors = pickle.load(wvFile)
 	return weightVectors
 
@@ -201,6 +276,9 @@ def evaluateOnTestSet(weightVectors, testTracks):
 	numEvaluated = 0.
 	numCorrect = 0.
 	testFeatures = getFeatureVectors(testTracks)
+	print testFeatures[0]
+	print testFeatures[20]
+	print testFeatures[100]
 	for i in range(len(testTracks)):
 		instGuesses = {}
 		for inst1 in insts:
@@ -209,17 +287,24 @@ def evaluateOnTestSet(weightVectors, testTracks):
 					result = dotProduct(weightVectors[inst1, inst2], testFeatures[i])
 					if result > 0:
 						instGuesses[inst1] = instGuesses.get(inst1, 0) + 1
+					#if result < 0:
+						#instGuesses[inst1] = instGuesses.get(inst1, 0) - 1
 
-		max = 0, ""
+		max = 0
 		# print instGuesses
 		for guess in instGuesses:
-			if instGuesses[guess] > max[0]:
-				max = instGuesses[guess], guess
-				print max
-				print getInstrument(testTracks[i])
+			if instGuesses[guess] > max:
+				max = instGuesses[guess]
+		possibilities = []
+		for guess in instGuesses:
+			if instGuesses[guess] == max:
+				possibilities.append(guess)
+		finalGuess = random.choice(possibilities) if len(possibilities) else None
+		print "guessed {} for {}. possibilities: {}".format(finalGuess, getInstrument(testTracks[i]), possibilities)
+		print instGuesses
 		# print max
 		numEvaluated += 1
-		if max[1] == getInstrument(testTracks[i]):
+		if finalGuess == getInstrument(testTracks[i]):
 			numCorrect += 1
 	print "Successfully guessed {} out of {} ({} correct)".format(numCorrect, numEvaluated, numCorrect/numEvaluated)
 
@@ -227,8 +312,12 @@ def evaluateOnTestSet(weightVectors, testTracks):
 # ------------------ MAIN ------------------
 tracks = readTracks()
 insts = getInstrumentSet(tracks)
-removeSmallEntries(tracks, insts)
+insts = removeSmallAndLargeEntries(tracks, insts)
+print insts 
+print len(tracks)
 trainTracks, testTracks = getTrainingAndTestSet(tracks)
+print len(trainTracks)
+print len(testTracks)
 
 # uncomment below to relearn weight vectors (e.g., if feature extractor changed)
 weightVectorsToPickle(trainTracks)
