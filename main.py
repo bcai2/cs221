@@ -323,7 +323,48 @@ def evaluateOnTestSet(weightVectors, testTracks):
 			numCorrect += 1
 	print "Successfully guessed {} out of {} ({} correct)".format(numCorrect, numEvaluated, numCorrect/numEvaluated)
 
-
+# evaluatePairs
+# Tests each weight vector only on the instruments in testTracks that correspond to it
+def evaluatePairs(weightVectors, testTracks):
+	results = {}
+	testFeatures = getFeatureVectors(testTracks)
+	print "Number correct out of total for each instrument pair:"
+	for inst1 in insts:
+		for inst2 in insts:
+			if not inst2 == inst1:
+				numEvaluated = 0.
+				numCorrect = 0.
+				for i in range(len(testTracks)):
+					if getInstrument(testTracks[i]) == inst1:
+						result = dotProduct(weightVectors[inst1, inst2], testFeatures[i])
+						if result > 0:
+							numEvaluated += 1
+							numCorrect += 1
+						else: numEvaluated += 1
+					if getInstrument(testTracks[i]) == inst2:
+						result = dotProduct(weightVectors[inst1, inst2], testFeatures[i])
+						if result < 0:
+							numEvaluated += 1
+							numCorrect += 1
+						else: numEvaluated += 1
+				results[inst1, inst2] = numCorrect, numEvaluated, numCorrect / numEvaluated
+				print "{} and {}: {}".format(inst1, inst2, results[inst1, inst2])
+	totalEvaluated = 0.0
+	totalCorrect = 0.0
+	totalPercentage = 0.0
+	for pair in results:
+		totalEvaluated += results[pair][1]
+		totalCorrect += results[pair][0]
+		totalPercentage += results[pair][2]
+	print "In total guessed {} correct out of {} with avg percentage {}".format(totalCorrect, totalEvaluated, totalPercentage / len(results))
+	percByInst = defaultdict(lambda:0.0)
+	for inst in insts:
+		for inst1, inst2 in results:
+			if inst == inst1 or inst == inst2:
+				percByInst[inst] += results[inst1, inst2][2]
+	print "percentages by instrument:"
+	for inst in percByInst:
+		print "{}: {}".format(inst, percByInst[inst]/(2 * (len(insts) - 1)))
 
 # ------------------ MAIN ------------------
 tracks = readTracks()
@@ -339,7 +380,7 @@ trainTracks, testTracks = getTrainingAndTestSet(tracks)
 weightVectors = pickleToWeightVectors()
 print len(weightVectors)
 evaluateOnTestSet(weightVectors, testTracks)
-
+evaluatePairs(weightVectors, testTracks)
 
 
 
